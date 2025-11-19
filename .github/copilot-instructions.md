@@ -2,182 +2,165 @@
 
 ## Project Overview
 
-**lmstudio-python** is the official Python SDK for LM Studio, providing both synchronous and asynchronous APIs to interact with LM Studio's native WebSocket API (not the OpenAI compatibility layer). The SDK communicates with a locally running LM Studio desktop application.
+Official Python SDK for LM Studio, providing sync/async APIs to LM Studio's native WebSocket API (not OpenAI compatibility). Communicates with locally running LM Studio desktop app.
 
-### Architecture
+## Architecture
 
-- **Dual API Surface**: Fully parallel sync (`sync_api.py`) and async (`async_api.py`) implementations
-  - Sync API uses background thread with async WebSocket (`_ws_thread.py`, `_ws_impl.py`)
-  - Both share common protocol logic in `json_api.py`
-- **Convenience Layer**: Top-level `import lmstudio as lms` provides implicit default `Client` for interactive use
-- **Schema Generation**: Python data models are auto-generated from TypeScript/Zod schemas in `lmstudio-js` submodule
-- **Plugin System**: Extensible plugin architecture in `src/lmstudio/plugin/` for custom tools and prompt modifications
+- Dual API: sync (`sync_api.py`) and async (`async_api.py`) implementations sharing `json_api.py` protocol logic.
+- Convenience API: `import lmstudio as lms` for implicit default Client.
+- Schema generation: Auto-generated from `lmstudio-js` submodule using `msgspec`.
+- Plugin system: Extensible in `src/lmstudio/plugin/`.
 
-### Key Components
+## Key Components
 
 ```
 src/lmstudio/
-├── sync_api.py          # Synchronous client (Client class at line 1540)
-├── async_api.py         # Asynchronous client (AsyncClient)
-├── json_api.py          # Shared protocol implementation
-├── history.py           # Chat history management
-├── schemas.py           # Base schema infrastructure
-├── _sdk_models/         # Auto-generated from lmstudio-js JSON schemas
-└── plugin/              # Plugin development framework
+├── sync_api.py (Client at line 1540)
+├── async_api.py (AsyncClient)
+├── json_api.py (shared protocol)
+├── _sdk_models/ (auto-generated)
+└── plugin/ (framework)
 ```
 
 ## Development Workflow
 
-### Testing Requirements
+### Testing
 
-**Critical**: Tests require LM Studio desktop app running locally with:
-- API server enabled on port 1234
-- Specific models loaded (see `tests/README.md`):
-  - `text-embedding-nomic-embed-text-v1.5` (embedding)
-  - `llama-3.2-1b-instruct` (text LLM)
-  - `ZiangWu/MobileVLM_V2-1.7B-GGUF` (visual LLM)
-  - `qwen2.5-7b-instruct-1m` (tool-using LLM)
+Requires LM Studio running locally on port 1234 with specific models loaded (see `tests/README.md`).
 
-```powershell
-# Load test models (unloads any existing instances first)
-tox -m load-test-models
+Steps:
+1. Start LM Studio desktop app and enable API server on port 1234.
+2. Load required models: `text-embedding-nomic-embed-text-v1.5`, `llama-3.2-1b-instruct`, etc.
+3. Run: `tox -m load-test-models` (unloads existing, loads test models).
+4. Test: `tox -m check` (static checks + tests) or `tox -m test_all` (all Python versions).
 
-# Run tests
-tox -m check          # Recommended: runs static checks + tests
-tox -m test           # Just run tests (py3.12 by default)
-tox -m test_all       # Test all Python versions (3.10-3.14)
+### Code Quality
+
+```bash
+tox -e format           # Ruff format
+tox -m static           # Lint + typecheck
 ```
 
-### Code Quality Commands
+### Schema Sync
 
-```powershell
-tox -e format         # Auto-format with ruff
-tox -m static         # Run lint + typecheck
-tox -e lint           # Ruff linting only
-tox -e typecheck      # mypy strict mode checking
-```
+When `lmstudio-js` schemas change:
+1. Update submodule: `git submodule update --init --recursive`
+2. Regenerate models: `tox -e sync-sdk-schema`
+3. Fix breaks in API files, run tests.
 
-### Schema Synchronization
+## Code Patterns
 
-When `lmstudio-js` schemas change, regenerate Python models:
-
-```powershell
-# Requires lmstudio-js submodule initialized
-git submodule update --init --recursive
-
-# Regenerate Python data models from TypeScript schemas
-tox -e sync-sdk-schema
-```
-
-This runs `sdk-schema/sync-sdk-schema.py` which:
-1. Exports JSON schemas from `lmstudio-js` TypeScript/Zod definitions
-2. Uses `datamodel-code-generator` to create Python `msgspec` classes
-3. Writes to `src/lmstudio/_sdk_models/`
-
-## Code Patterns & Conventions
-
-### Client Lifecycle
+### Client Usage
 
 ```python
-# Convenience API (implicit default client)
 import lmstudio as lms
-model = lms.llm()  # Auto-connects on first use
+model = lms.llm()  # Convenience
 
-# Explicit client management (preferred for production)
+# Production
 from lmstudio.sync_api import Client
 client = Client()
 with client.llm as session:
     model = session.model()
 ```
 
-### Dual API Consistency
+### Dual API Maintenance
 
-**Always maintain parallel sync/async implementations**. Pattern:
-- Sync methods in `sync_api.py` → blocking, uses background thread
-- Async methods in `async_api.py` → `async def`, returns awaitables
-- Shared logic in `json_api.py` → I/O-agnostic protocol handling
+Maintain parallel sync/async methods. Shared logic in `json_api.py`.
+
+Example: Adding a new method `get_status()`:
+- In `json_api.py`: Add protocol method.
+- In `sync_api.py`: `def get_status(self) -> Status: ...`
+- In `async_api.py`: `async def get_status(self) -> Status: ...`
 
 ### Error Handling
 
-Use SDK-specific exceptions from `sdk_api.py`:
-- `LMStudioClientError` - Client-side issues (connection, configuration)
-- `LMStudioPredictionError` - Model prediction failures
-- `LMStudioTimeoutError` - Operation timeouts
-- `LMStudioCancelledError` - Cancelled operations
+Use exceptions from `sdk_api.py`: `LMStudioClientError`, `LMStudioPredictionError`, etc. Decorate public APIs with `@sdk_public_api()`.
 
-Wrap public API methods with `@sdk_public_api()` decorator to filter tracebacks.
+Example:
+```python
+@sdk_public_api()
+def complete(self, prompt: str) -> str:
+    try:
+        return self._complete(prompt)
+    except Exception as e:
+        raise LMStudioPredictionError(f"Completion failed: {e}")
+```
 
 ### Type Hints
 
-- **Strict mypy**: All code must pass `mypy --strict`
-- Use `msgspec.Struct` for data models (not Pydantic, except for testing structured responses)
-- Generic types extensively used: see `TypeVar` definitions in API files
-- Pattern matching requires Python 3.10+ (use `match`/`case` for type discrimination)
+Strict mypy. Use `msgspec.Struct` for models. Generics and pattern matching (Python 3.10+).
+
+Example:
+```python
+from msgspec import Struct
+
+class ModelInfo(Struct):
+    name: str
+    size: int
+
+def get_model_info(model_id: str) -> ModelInfo:
+    # Implementation
+```
 
 ### Logging
 
-Use structured logging via `_logging.py`:
 ```python
 from ._logging import new_logger
 logger = new_logger(__name__)
-logger.debug("Message", json=data_dict)  # Structured context
+logger.debug("Message", json=data)
 ```
 
-## Testing Patterns
+## Testing
 
-### Fixtures (conftest.py)
+Semi-automated: requires LM Studio running. Fixtures in `conftest.py`. Test groups in `tests/sync/`, `tests/async/`.
 
-Tests use `pytest` with custom fixtures for LM Studio connections. The test suite is semi-automated requiring manual model loading.
-
-### Test Organization
-
-```
-tests/
-├── sync/           # Synchronous API tests
-├── async/          # Asynchronous API tests
-├── support/        # Test utilities and fixtures
-└── invalid_plugins/ # Plugin error case tests
-```
-
-Run specific test groups:
-```powershell
-tox -- tests/sync/               # Only sync tests
-tox -- tests/test_inference.py   # Specific test file
-tox -- -k "test_embedding"       # Tests matching pattern
-```
+Run specific: `tox -- tests/sync/test_llm_sync.py`
 
 ## Common Tasks
 
-### Adding a New API Method
+- Adding API method: Add to `json_api.py`, then parallel in sync/async, decorate, test both.
+- Updating models: Sync submodule, run `tox -e sync-sdk-schema`, fix breaks, test.
+- Plugins: See `examples/plugins/`.
 
-1. Add to `json_api.py` if protocol-level (shared sync/async)
-2. Add parallel implementations to `sync_api.py` and `async_api.py`
-3. Decorate with `@sdk_public_api()` or `@sdk_public_api_async()`
-4. Update type hints and ensure mypy passes
-5. Add tests to both `tests/sync/` and `tests/async/`
+## Plugin Development
 
-### Updating Generated Models
+Plugins extend LM Studio with custom tools or prompt modifications. Framework in `src/lmstudio/plugin/`.
 
-When `lmstudio-js` schema changes:
-1. Update submodule: `git submodule update --remote`
-2. Regenerate: `tox -e sync-sdk-schema`
-3. Fix any breaking changes in `json_api.py`, `sync_api.py`, `async_api.py`
-4. Run full test suite: `tox -m test_all`
+Structure:
+- `manifest.json`: Defines plugin metadata and hooks.
+- `src/`: Implementation code.
 
-### Plugin Development
+Example manifest (from `examples/plugins/dice-tool/`):
+```json
+{
+  "name": "dice-tool",
+  "description": "A tool for rolling dice",
+  "hooks": ["tool"]
+}
+```
 
-See `examples/plugins/` for reference implementations. Plugins use manifest-driven configuration with hook system defined in `src/lmstudio/plugin/hooks/`.
+Hook implementation:
+```python
+from lmstudio.plugin import ToolHook
 
-## Critical Notes
+class DiceTool(ToolHook):
+    def get_tools(self):
+        return [{
+            "name": "roll_dice",
+            "description": "Roll a die with specified sides",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sides": {"type": "integer", "default": 6}
+                }
+            }
+        }]
 
-- **WebSocket Implementation**: Uses `httpx-ws` with multiplexed channels over single connection
-- **Thread Safety**: Sync API uses thread-safe queues and futures for cross-thread communication
-- **No OpenAI Compatibility**: This SDK talks to LM Studio's native API, NOT the OpenAI-compatible endpoint
-- **Model Identifiers**: Can be model keys (download names) or instance identifiers (loaded instances)
-- **Versioning**: Uses semantic-like versioning (X.Y.Z) but with specific policies (see README)
+    def call_tool(self, name, arguments):
+        if name == "roll_dice":
+            import random
+            sides = arguments.get("sides", 6)
+            return random.randint(1, sides)
+```
 
-## References
-
-- Main docs: https://lmstudio.ai/docs/python
-- Related repo: https://github.com/lmstudio-ai/lmstudio-js (TypeScript SDK, schema source)
-- Discord: https://discord.gg/pwQWNhmQTY (#dev-chat channel)
+Load plugin: Use `lmstudio plugin load <path>` or via API.
